@@ -260,6 +260,41 @@ namespace Westwind.Scripting
             return InvokeMethod(instance, methodName, parameters);
         }
 
+        /// <summary>
+        /// 生成可用于执行方法的程序集
+        /// </summary>
+        /// <param name="code">原始方法代码</param>
+        /// <returns></returns>
+        public bool CompileAssemblyForExecuteMethod(string code)
+        {
+            ClearErrors();
+
+            int hash = GenerateHashCode(code);
+
+            // check for #r and using directives
+            code = ParseReferencesInCode(code);
+
+            if (!CachedAssemblies.ContainsKey(hash))
+            {
+                var sb = GenerateClass(code);
+                if (!CompileAssembly(sb.ToString(), true))
+                    return false;
+
+                CachedAssemblies[hash] = Assembly;
+            }
+            else
+            {
+                Assembly = CachedAssemblies[hash];
+
+                // Figure out the class name
+                var type = Assembly.ExportedTypes.First();
+                GeneratedClassName = type.Name;
+                GeneratedNamespace = type.Namespace;
+            }
+
+            return true;
+        }
+
 
 
         /// <summary>
