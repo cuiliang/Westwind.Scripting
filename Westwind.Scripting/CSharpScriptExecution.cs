@@ -1142,14 +1142,11 @@ namespace Westwind.Scripting
         /// </summary>
         public void AddDefaultReferencesAndNamespaces()
         {
-
-
-#if NET462
-            AddNetFrameworkDefaultReferences();
-            AddAssembly(typeof(Microsoft.CSharp.RuntimeBinder.RuntimeBinderException));
-#endif
 #if NETCORE
             AddNetCoreDefaultReferences();
+            AddAssembly(typeof(Microsoft.CSharp.RuntimeBinder.RuntimeBinderException));
+#else
+            AddNetFrameworkDefaultReferences();
             AddAssembly(typeof(Microsoft.CSharp.RuntimeBinder.RuntimeBinderException));
 #endif
 
