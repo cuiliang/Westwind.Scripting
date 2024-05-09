@@ -1489,8 +1489,16 @@ public bool AddAssembly(Type type)
                     continue;
                 }
 
+                // 将using语句添加到前面。 需要排除using var xxx = new xxx(), using (var xxx = new xxx())等情况。
+                // using Namespace; //需要处理
+                // using Name = Namespace; //需要处理
+                // using var Name = new Obj(); //不需要处理
+                // using (var Name = new Obj()) //不需要处理
                 if (line.Trim().StartsWith("using ")
-                    //&& !line.Contains("(")
+                    && !line.Contains("(")
+                    //&& !line.Contains("=")
+                    && !line.Contains("new ")
+                    && !line.Contains("new\t")
                     //&& !line.StartsWith("//")
                     )
                 {
