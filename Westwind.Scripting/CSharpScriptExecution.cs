@@ -1315,9 +1315,6 @@ namespace Westwind.Scripting
 #if NET6_0_OR_GREATER
             AddNetCoreDefaultReferences();
             AddAssembly(typeof(Microsoft.CSharp.RuntimeBinder.RuntimeBinderException));
-#else
-            AddNetFrameworkDefaultReferences();
-            AddAssembly(typeof(Microsoft.CSharp.RuntimeBinder.RuntimeBinderException));
 #endif
 
             AddNamespaces(DefaultNamespaces);
