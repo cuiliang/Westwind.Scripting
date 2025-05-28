@@ -1,11 +1,8 @@
 ﻿using System;
-using System.Reflection;
-using System.Text;
+using System.Linq;
+using System.Runtime.Loader;
 using System.Threading.Tasks;
-using Microsoft.CodeAnalysis.CSharp.Scripting;
-using Microsoft.CodeAnalysis.Scripting;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
-using Westwind.Utilities;
 
 namespace Westwind.Scripting.Test
 {
@@ -78,5 +75,58 @@ Console.WriteLine(""Retrieving..."");
 
         }
 
+#if NET6_0_OR_GREATER
+        [TestMethod]
+        public void UseAlternateAssemblyLoadContext_LoadsAssembliesInAlternateContextTest()
+        {
+            var myContext = new AssemblyLoadContext("MyContext", true);
+
+            string codeBlock =
+@"
+int a = 0;
+int b = (int) @0;
+return a + b;";
+
+            for (int i = 0; i < 10; i++)
+            {
+                var exec = new CSharpScriptExecution() { SaveGeneratedCode = false };
+                exec.AddDefaultReferencesAndNamespaces();
+                exec.AlternateAssemblyLoadContext = myContext;
+
+                exec.ExecuteCode<int>(codeBlock, i);
+            }
+
+            Assert.AreEqual(1, myContext.Assemblies.Count());
+            myContext.Unload();
+        }
+
+        [TestMethod]
+        public void DisabledAssemblyCaching_GeneratesAssemblyForEachExecution()
+        {
+            var myContext = new AssemblyLoadContext("MyContext", true);
+
+            string codeBlock =
+@"
+int a = 0;
+int b = (int) @0;
+return a + b;";
+
+            for (int i = 0; i < 10; i++)
+            {
+                var exec = new CSharpScriptExecution() { SaveGeneratedCode = true };
+                exec.AddDefaultReferencesAndNamespaces();
+                exec.AlternateAssemblyLoadContext = myContext;
+                exec.DisableAssemblyCaching = true;
+
+                var result = exec.ExecuteCode<int>(codeBlock, i);
+                Console.WriteLine(exec.ErrorMessage);
+                System.Console.WriteLine(result.ToString());
+            }
+
+            Assert.AreEqual(10, myContext.Assemblies.Count());
+            myContext.Unload();
+        }
+#endif
     }
+
 }

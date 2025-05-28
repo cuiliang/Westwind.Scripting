@@ -4,8 +4,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using System.Reflection.Emit;
 using System.Reflection.Metadata;
+using System.Runtime.Loader;
 using System.Text;
 using System.Threading.Tasks;
 using Microsoft.CodeAnalysis;
@@ -117,6 +117,44 @@ namespace Westwind.Scripting
         /// </summary>
         public bool CompileWithDebug { get; set; }
 
+#if NET6_0_OR_GREATER
+        /// <summary>
+        /// The AssemblyLoadContext the assembly should be loaded in.
+        /// If not assigned, assemblies will get loaded by the default Assembly.Load methods
+        /// If the alternate AssemblyLoadContext is assigned, that will be used instead
+        /// This allows for unloading of the loaded assemblies
+        /// </summary>
+        public AssemblyLoadContext AlternateAssemblyLoadContext { get; set; }
+#endif
+
+        /// <summary>
+        /// If disabled, assemblies will not be cached through hashes
+        /// Instead for each execution a new unique assembly will get generated and loaded
+        /// This combined with an alternate AssemblyLoadContext can lower the memory pressure of long running programs executing a lot of different code
+        /// </summary>
+        public bool DisableAssemblyCaching { get; set; }
+
+
+        /// <summary>
+        /// Disables caching object instances that are created after CompileClass
+        /// If true you can't execute new code on the instance as the class instance
+        /// is cached. If false the instance is cached and automatically resused.       
+        /// </summary>
+        /// <remarks>
+        /// The ideals use case treats the script execution class as a single code unit
+        /// so each piece of code (snippet, expresion, method or class) is generated
+        /// and treated distinctly and therefore it's recommended to NOT REUSE
+        /// instances for multiple pieces of code.
+        /// </remarks>
+        public bool DisableObjectCaching { get; set; }
+
+
+        /// <summary>
+        /// Optional code injections at various points in the code generation
+        /// </summary>
+        public CodeInjection CodeInjection { get; } = new();
+
+
 
         #region Error Handling Properties
 
@@ -163,10 +201,30 @@ namespace Westwind.Scripting
         /// <summary>
         /// Internal reference to the generated type that
         /// is to be invoked
+        ///
+        /// Can also be used to cache an object instance
+        /// using ReuseObjectInstance, which is useful
+        /// if you work with a single object/method
+        /// that is repeatedly called and never changes.
         /// </summary>
         public object ObjectInstance { get; set; }
 
-#endregion
+
+        /// <summary>
+        /// If true reuses the ObjectInstance fromt he previous
+        /// operation (if set) instead of creating a new instance.
+        ///
+        /// Use if you pre-generate a single instance and call one
+        /// or more methods/scripts repeatedly without changing the code.
+        ///
+        /// For most use cases leave this setting at false.
+        ///
+        /// IMPORTANT: If you change code either explicitly clear the
+        /// object reference or set this value to false.
+        /// </summary>
+        public bool ReuseObjectInstance { get; set; }
+
+        #endregion
 
         /// <summary>
         /// Creates a default Execution Engine which has:
@@ -209,7 +267,7 @@ namespace Westwind.Scripting
         /// Executes a complete method by wrapping it into a class, compiling
         /// and instantiating the class and calling the method.
         ///
-        /// Class should include full class header (instance type, return value and parameters)
+        /// Code should include full method header (instance type, return value and parameters)
         ///
         /// Example:
         /// "public string HelloWorld(string name) { return name; }"
@@ -230,34 +288,58 @@ namespace Westwind.Scripting
         {
             ClearErrors();
 
-            int hash = GenerateHashCode(code);
-
             // check for #r and using directives
             code = ParseReferencesInCode(code);
-            
-            if (!CachedAssemblies.ContainsKey(hash))
+
+            if (DisableAssemblyCaching)
             {
                 var sb = GenerateClass(code);
                 if (!CompileAssembly(sb.ToString()))
                     return null;
-
-                CachedAssemblies[hash] = Assembly;
             }
             else
             {
-                Assembly = CachedAssemblies[hash];
+                int hash = GenerateHashCode(code);
 
-                // Figure out the class name
-                var type = Assembly.ExportedTypes.First();
-                GeneratedClassName = type.Name;
-                GeneratedNamespace = type.Namespace;
+                if (!CachedAssemblies.ContainsKey(hash))
+                {
+                    GeneratedClassName = "_" + Utils.GenerateUniqueId();                    
+                    var sb = GenerateClass(code);
+                    if (!CompileAssembly(sb.ToString()))
+                        return null;
+
+                    CachedAssemblies[hash] = Assembly;
+                }
+                else
+                {
+                    Assembly = CachedAssemblies[hash];
+
+                    // Figure out the class name
+                    var type = Assembly.ExportedTypes.First();
+                    GeneratedClassName = type.Name;
+                    GeneratedNamespace = type.Namespace;
+                }
             }
 
             var instance = CreateInstance(); // also stores into `ObjectInstance` so it can be reused
             if (instance == null)
                 return null;
 
-            return InvokeMethod(instance, methodName, parameters);
+            if (ThrowExceptions)
+            {
+                return InvokeMethod(instance, methodName, parameters);
+            }
+
+            try
+            {
+                return InvokeMethod(instance, methodName, parameters);
+            }
+            catch (Exception ex)
+            {
+                SetErrors(ex);
+                ErrorType = ExecutionErrorTypes.Runtime;
+                return default;
+            }
         }
 
         /// <summary>
@@ -301,7 +383,7 @@ namespace Westwind.Scripting
         /// Executes a complete method by wrapping it into a class, compiling
         /// and instantiating the class and calling the method.
         ///
-        /// Class should include full class header (instance type, return value and parameters)
+        /// Code should include full method header (instance type, return value and parameters)
         ///
         /// Example:
         /// "public string HelloWorld(string name) { return name; }"
@@ -320,7 +402,26 @@ namespace Westwind.Scripting
         /// <returns></returns>
         public TResult ExecuteMethod<TResult>(string code, string methodName, params object[] parameters)
         {
-            var result = ExecuteMethod(code, methodName, parameters);
+            object result;
+            if (ThrowExceptions)
+            {
+                result = ExecuteMethod(code, methodName, parameters);
+            }
+            else
+            {
+
+                try
+                {
+                    result = ExecuteMethod(code, methodName, parameters);
+                }
+                catch (Exception ex)
+                {
+                    SetErrors(ex);
+                    ErrorType = ExecutionErrorTypes.Runtime;
+                    return default;
+                }
+            }
+
 
             if (result is TResult)
                 return (TResult) result;
@@ -331,8 +432,8 @@ namespace Westwind.Scripting
 
         /// <summary>
         /// Executes a complete async method by wrapping it into a class, compiling
-        /// and instantiating the class and calling the method and unwrapping the
-        /// task result.
+        /// and instantiating the class and calling the method. This method has to
+        /// return a result value - it cannot be void!
         ///
         /// Class should include full class header (instance type, return value and parameters)
         ///
@@ -351,32 +452,29 @@ namespace Westwind.Scripting
         /// <returns>result value of the method</returns>
         public async Task<object> ExecuteMethodAsync(string code, string methodName, params object[] parameters)
         {
+
             // this result will be a task of object (async method called)
-            var taskResult = ExecuteMethod(code, methodName, parameters) as Task<object>;
-
-            if (taskResult == null)
-                return default;
-
-            object result = null;
+            // we have to do this separately to avoid 
             if (ThrowExceptions)
             {
-                result = await ((Task<object>) taskResult);
-            }
-            else
-            {
-                try
-                {
-                    result = await ((Task<object>) taskResult);
-                }
-                catch (Exception ex)
-                {
-                    SetErrors(ex);
-                    ErrorType = ExecutionErrorTypes.Runtime;
-                    return default;
-                }
+                if (ExecuteMethod(code, methodName, parameters) is Task<object> task)
+                    return await task;
             }
 
-            return result; 
+            try
+            {
+                if (ExecuteMethod(code, methodName, parameters) is Task<object> task)
+                    return await task;
+
+            }
+            catch (Exception ex)
+            {
+                SetErrors(ex);
+                ErrorType = ExecutionErrorTypes.Runtime;
+                return default;
+            }
+
+            return default;
         }
 
 
@@ -385,7 +483,7 @@ namespace Westwind.Scripting
         /// and instantiating the class and calling the method and unwrapping the
         /// task result.
         ///
-        /// Class should include full class header (instance type, return value and parameters)
+        /// Method should include full method header (instance type, return value and parameters)
         ///
         /// "public async Task&lt;string&gt; HelloWorld(string name) { await Task.Delay(1); return name; }"
         ///
@@ -400,26 +498,19 @@ namespace Westwind.Scripting
         /// <param name="parameters">any number of variable parameters</param>
         /// <typeparam name="TResult">The result type (string, object, etc.) of the method</typeparam>
         /// <returns>result value of the method</returns>
-        public async Task<TResult> ExecuteMethodAsync<TResult>(string code, string methodName,
-            params object[] parameters)
+        public async Task<TResult> ExecuteMethodAsync<TResult>(string code, string methodName, params object[] parameters)
         {
-            // this result will be a task of object (async method called)
-            var taskResult = ExecuteMethod(code, methodName, parameters) as Task<TResult>;
-
-
-            if (taskResult == null)
-                return default;
-
-            TResult result;
             if (ThrowExceptions)
             {
-                result = await taskResult;
+                if (ExecuteMethod(code, methodName, parameters) is Task<TResult> task)
+                    return await task;
             }
             else
             {
                 try
                 {
-                    result = await taskResult;
+                    if (ExecuteMethod(code, methodName, parameters) is Task<TResult> task)
+                        return await task;
                 }
                 catch (Exception ex)
                 {
@@ -429,8 +520,53 @@ namespace Westwind.Scripting
                 }
             }
 
-            return (TResult) result;
+            return default;
         }
+
+        /// <summary>
+        /// Executes a complete async method by wrapping it into a class, compiling
+        /// and instantiating the class and calling the method. This method returns
+        /// no value.
+        ///
+        /// Class should include full class header (instance type, return value and parameters)
+        ///
+        /// "public async Task&lt;object&gt; HelloWorld(string name) { await Task.Delay(1); return name; }"
+        /// "public async Task HelloWorld(string name) { await Task.Delay(1); Console.WriteLine(name); }"
+        /// 
+        /// Async Method Note: Keep in mind that
+        /// the method is not cast to that result - it's cast to object so you
+        /// have to unwrap it:
+        /// var objTask = script.ExecuteMethod(asyncCodeMethod); // object result
+        /// var result = await (objTask as Task&lt;string&gt;);  //  cast and unwrap
+        /// </summary>
+        /// <param name="code">One or more complete methods.</param>
+        /// <param name="methodName">Name of the method to call.</param>
+        /// <param name="parameters">any number of variable parameters</param>
+        /// <returns>result value of the method</returns>
+        public async Task ExecuteMethodAsyncVoid(string code, string methodName, params object[] parameters)
+        {
+            // this result will be a task of object (async method called)
+            // we have to do this separately to avoid 
+            if (ThrowExceptions)
+            {
+                if (ExecuteMethod(code, methodName, parameters) is Task task)
+                    await task;
+                return;
+            }
+
+            try
+            {
+                if (ExecuteMethod(code, methodName, parameters) is Task task)
+                    await task;
+            }
+            catch (Exception ex)
+            {
+                SetErrors(ex);
+                ErrorType = ExecutionErrorTypes.Runtime;
+            }
+        }
+
+        
 
         /// <summary>
         /// Evaluates a single value or expression that returns a value.
@@ -763,6 +899,7 @@ namespace Westwind.Scripting
             return ExecuteMethodAsync<TResult>(code, "ExecuteMethod", parameters);
         }
 
+
         #endregion
 
         #region Execute Script
@@ -816,8 +953,6 @@ namespace Westwind.Scripting
             ClearErrors();
 
             var tree = SyntaxFactory.ParseSyntaxTree(source.Trim());
-
-            
             var optimizationLevel = CompileWithDebug ? OptimizationLevel.Debug : OptimizationLevel.Release;
             
             
@@ -876,10 +1011,19 @@ namespace Westwind.Scripting
 
             if (!noLoad)
             {
+                Assembly = null;
+
                 if (!isFileAssembly)
-                    Assembly = Assembly.Load(((MemoryStream) codeStream).ToArray());
+                    Assembly = LoadAssembly(((MemoryStream) codeStream).ToArray());
                 else
-                    Assembly = Assembly.LoadFrom(OutputAssembly);
+                    Assembly = LoadAssemblyFrom(OutputAssembly);
+
+                if (Assembly == null)
+                {
+                    ErrorType = ExecutionErrorTypes.Compilation;
+                    ErrorMessage = "Couldn't load compiled assembly.";
+                    return false;
+                }
             }
 
             return true;
@@ -905,7 +1049,6 @@ namespace Westwind.Scripting
             ClearErrors();
 
             var sourceCode = SourceText.From(codeInputStream);
-
             var tree = SyntaxFactory.ParseSyntaxTree(sourceCode);
 
             var compilation = CSharpCompilation.Create(GeneratedClassName + ".cs")
@@ -938,7 +1081,7 @@ namespace Westwind.Scripting
                     }
 
                     if (!noLoad)
-                        Assembly = Assembly.Load(codeStream.ToArray());
+                        Assembly = LoadAssembly(codeStream.ToArray());
                 }
             }
             else
@@ -963,7 +1106,7 @@ namespace Westwind.Scripting
                 }
 
                 if (!noLoad)
-                    Assembly = Assembly.LoadFrom(OutputAssembly);
+                    Assembly = LoadAssemblyFrom(OutputAssembly);
             }
 
             return true;
@@ -998,6 +1141,7 @@ namespace Westwind.Scripting
         /// 
         /// Must have include parameterless ctor()
         /// </summary>
+        /// <remarks>Does not allow for #r reference inclusion - if you need #r </remarks>
         /// <param name="code">Fully self-contained C# class</param>
         /// <returns>Instance of that class or null</returns>
         public dynamic CompileClass(Stream code)
@@ -1023,21 +1167,32 @@ namespace Westwind.Scripting
         /// <returns>Instance of that class or null</returns>
         public Type CompileClassToType(string code)
         {
-            int hash = code.GetHashCode();
+            code = ParseReferencesInCode(code, true);
 
             GeneratedClassCode = code;
 
-            if (!CachedAssemblies.ContainsKey(hash))
+            if (DisableAssemblyCaching)
             {
                 if (!CompileAssembly(code))
                     return null;
-
-                CachedAssemblies[hash] = Assembly;
             }
             else
             {
-                Assembly = CachedAssemblies[hash];
+                int hash = code.GetHashCode();
+
+                if (!CachedAssemblies.ContainsKey(hash))
+                {
+                    if (!CompileAssembly(code))
+                        return null;
+
+                    CachedAssemblies[hash] = Assembly;
+                }
+                else
+                {
+                    Assembly = CachedAssemblies[hash];
+                }
             }
+
 
             // Figure out the class name
             return Assembly.ExportedTypes.First();
@@ -1049,25 +1204,33 @@ namespace Westwind.Scripting
         /// including namespace and using wrapper to compile
         /// from an input stream.
         /// </summary>
+        /// <remarks>Does not parse #r reference inclusion. If you need to use #r pass code as string</remarks>
         /// <param name="codeStream">Fully self-contained C# class</param>
         /// <returns>A type reference to the generated class</returns>
         public Type CompileClassToType(Stream codeStream)
         {
-            int hash = codeStream.GetHashCode();
-
-            
-            if (!CachedAssemblies.ContainsKey(hash))
+            if (DisableAssemblyCaching)
             {
                 if (!CompileAssembly(codeStream))
                     return null;
-
-                CachedAssemblies[hash] = Assembly;
             }
             else
             {
-                Assembly = CachedAssemblies[hash];
-            }
+                int hash = codeStream.GetHashCode();
+                if (!CachedAssemblies.ContainsKey(hash))
+                {
 
+                    if (!CompileAssembly(codeStream))
+                        return null;
+
+                    CachedAssemblies[hash] = Assembly;
+                }
+                else
+                {
+                    Assembly = CachedAssemblies[hash];
+                }
+
+            }
             // Figure out the class name
             return Assembly.ExportedTypes.First();
         }
@@ -1130,7 +1293,7 @@ namespace Westwind.Scripting
 
 #endregion
 
-#region Refereneces and Namespaces
+#region References and Namespaces
 
 
         /// <summary>
@@ -1142,7 +1305,14 @@ namespace Westwind.Scripting
         /// </summary>
         public void AddDefaultReferencesAndNamespaces()
         {
-#if NETCORE
+
+
+
+#if NETFRAMEWORK
+            AddNetFrameworkDefaultReferences();
+            AddAssembly(typeof(Microsoft.CSharp.RuntimeBinder.RuntimeBinderException));
+#endif
+#if NET6_0_OR_GREATER
             AddNetCoreDefaultReferences();
             AddAssembly(typeof(Microsoft.CSharp.RuntimeBinder.RuntimeBinderException));
 #else
@@ -1212,7 +1382,7 @@ namespace Westwind.Scripting
 
             AddAssembly("Microsoft.CSharp.dll"); // dynamic
 
-#if NETCORE
+#if NET6_0_OR_GREATER
             AddAssemblies(
                 "System.Linq.Expressions.dll", // IMPORTANT!
                 "System.Text.RegularExpressions.dll" // IMPORTANT!
@@ -1261,7 +1431,7 @@ namespace Westwind.Scripting
             );
 
             // this library and CodeAnalysis libs
-            AddAssembly(typeof(ReferenceList)); // Scripting Library
+            AddAssembly(typeof(CSharpScriptExecution)); // this scripting Library
         }
 
         /// <summary>
@@ -1325,9 +1495,9 @@ public bool AddAssembly(Type type)
 
         if (string.IsNullOrEmpty(type.Assembly.Location))
         {
-#if NETCORE
-            unsafe
-            {
+#if NET6_0_OR_GREATER
+                    unsafe
+                    {
                 bool result = type.Assembly.TryGetRawMetadata(out byte* metaData, out int size);
                 var moduleMetaData = ModuleMetadata.CreateFromMetadata( (nint) metaData, size);
                 var assemblyMetaData = AssemblyMetadata.Create(moduleMetaData);
@@ -1463,20 +1633,19 @@ public bool AddAssembly(Type type)
         /// </summary>
         /// <param name="code"></param>
         /// <returns></returns>
-        private string ParseReferencesInCode(string code)
+        private string ParseReferencesInCode(string code, bool referencesOnly = false)
         {
             if (string.IsNullOrEmpty(code)) return code;
 
-            if (!code.Contains("#r ") && !code.Contains("using "))
+            if (!code.Contains("#r ") && ( !referencesOnly && !code.Contains("using ") ) )
                 return code;
-
-
+            
             StringBuilder sb = new StringBuilder();
             var snippetLines = GetLines(code);
 
             foreach (var line in snippetLines)
             {
-                if (line.Trim().Contains("#r "))
+                if (line.Trim().StartsWith("#r "))
                 {
                     if (AllowReferencesInCode)
                     {
@@ -1494,13 +1663,17 @@ public bool AddAssembly(Type type)
                 // using Name = Namespace; //需要处理
                 // using var Name = new Obj(); //不需要处理
                 // using (var Name = new Obj()) //不需要处理
-                if (line.Trim().StartsWith("using ")
+                var lineTrimmed = line.Trim();  
+                if (!referencesOnly
+                    && lineTrimmed.StartsWith("using ")
                     && !line.Contains("(")
                     //&& !line.Contains("=")
                     && !line.Contains("new ")
                     && !line.Contains("new\t")
                     //&& !line.StartsWith("//")
+                    && lineTrimmed.EndsWith(";")
                     )
+                //原始代码：if (!referencesOnly && line.Trim().StartsWith("using ") && line.Trim().EndsWith(";"))
                 {
                     string ns = line.Replace("using ", "").Replace(";", "").Trim();
                     AddNamespace(ns);
@@ -1560,15 +1733,17 @@ public bool AddAssembly(Type type)
         }
 
 
-#endregion
+        #endregion
 
-#region Reflection Helpers
-
+        #region Reflection Helpers
 
         /// <summary>
         /// Helper method to invoke a method on an object using Reflection
         /// </summary>
-        /// <param name="instance">An object instance. null uses ObjectInstance property if set.</param>
+        /// <param name="instance">An object instance. null uses ObjectInstance property if set.
+        ///
+        /// Pass `null` to use a previously set ObjectInstance.        
+        /// </param>
         /// <param name="method">The method name as a string</param>
         /// <param name="parameters">a variable list of parameters to pass</param>
         /// <exception cref="ArgumentNullException">Throws if the instance is null</exception>
@@ -1588,6 +1763,7 @@ public bool AddAssembly(Type type)
                 return instance.GetType().InvokeMember(method, BindingFlags.InvokeMethod, null, instance, parameters);
             } 
 
+            
             try
             {
                 return instance.GetType().InvokeMember(method, BindingFlags.InvokeMethod, null, instance, parameters);
@@ -1601,13 +1777,15 @@ public bool AddAssembly(Type type)
             return null;
         }
 
-        
+
+
         /// <summary>
         /// Creates an instance of the object specified
         /// by the GeneratedNamespace and GeneratedClassName
         /// in the currently active, compiled assembly
         ///
         /// Sets the ObjectInstance member which is returned
+        /// and which can possibly be reused.
         /// </summary>
         /// <param name="force">If true force to create a new instance regardless whether an instance is already loaded</param>
         /// <returns>Instance of the class or null on error</returns>
@@ -1615,8 +1793,11 @@ public bool AddAssembly(Type type)
         {
             ClearErrors();
 
-            if (ObjectInstance != null && !force)
-                return ObjectInstance;
+            if (ReuseObjectInstance)
+            {
+                if (ObjectInstance != null && !force)
+                    return ObjectInstance;
+            }
 
             try
             {
@@ -1630,6 +1811,8 @@ public bool AddAssembly(Type type)
 
             return null;
         }
+
+        
 
         /// <summary>
         /// Generates a hashcode for a block of code
@@ -1651,6 +1834,29 @@ public bool AddAssembly(Type type)
             return Path.GetDirectoryName(typeof(object).Assembly.Location);
         }
 
+        private Assembly LoadAssembly(byte[] rawAssembly)
+        {
+#if NET6_0_OR_GREATER
+            if (AlternateAssemblyLoadContext != null)
+            {
+                return AlternateAssemblyLoadContext.LoadFromStream(new MemoryStream(rawAssembly));
+            }
+#endif
+            return Assembly.Load(rawAssembly);
+        }
+
+        private Assembly LoadAssemblyFrom(string assemblyFile)
+        {
+
+#if NET6_0_OR_GREATER
+            if (AlternateAssemblyLoadContext != null)
+            {
+                return AlternateAssemblyLoadContext.LoadFromAssemblyPath(assemblyFile);
+            }
+#endif
+            return Assembly.LoadFrom(assemblyFile);
+        }
+
 #endregion
 
 
@@ -1661,8 +1867,15 @@ public bool AddAssembly(Type type)
         {
             "System", "System.Text", "System.Reflection", "System.IO", "System.Net", "System.Net.Http",
             "System.Collections", "System.Collections.Generic", "System.Collections.Concurrent",
-            "System.Text.RegularExpressions", "System.Threading.Tasks", "System.Linq"
+            "System.Text.RegularExpressions", "System.Threading.Tasks", "System.Linq", "Westwind.Scripting"
         };
+    }
+
+    public class CodeInjection
+    {
+        public string ClassHeader { get; set; }
+
+        public string MethodHeader { get; set;  }
     }
 
     public enum ExecutionErrorTypes

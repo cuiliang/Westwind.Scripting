@@ -1,10 +1,7 @@
 ﻿using System;
-using System.Dynamic;
-using System.IO;
 using System.Threading.Tasks;
-using Microsoft.CodeAnalysis.Emit;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
-using Westwind.Scripting;
+using Westwind.Utilities;
 
 namespace Westwind.Scripting.Test
 {
@@ -16,6 +13,7 @@ namespace Westwind.Scripting.Test
         public void ExecuteScriptNoModelTest()
         {
             string script = @"
+
 Hello World. Date is: {{ DateTime.Now.ToString(""d"") }}!
 
 {{% for(int x=1; x<3; x++) { }}
@@ -30,11 +28,9 @@ DONE!
             var result = scriptParser.ExecuteScript(script, null);
 
             Console.WriteLine(result);
-            Console.WriteLine(scriptParser.ScriptEngine.GeneratedClassCode);
+            Console.WriteLine(scriptParser.ScriptEngine.GeneratedClassCodeWithLineNumbers);
 
             Assert.IsNotNull(script, "Code should not be null or empty");
-
-            
         }
 
         /// <summary>
@@ -52,22 +48,23 @@ DONE!
             var model = new TestModel { Name = "rick", DateTime = DateTime.Now.AddDays(-10) };
 
             string script = @"
-Hello World. Date is: {{ Model.DateTime.ToString(""d"") }}!
-{{% for(int x=1; x<3; x++) {
+{{%
+    using Westwind.Utilities;
 }}
-{{ x }}. Hello World {{Model.Name}}
+Hello World. Date is: {{ DateTime.Now.ToString(""d"") }}!
+
+{{% for(int x=1; x<3; x++) { }}
+{{ x }}. {{ StringUtils.Replicate(""Hello World "",2) }}
 {{% } }}
 
 And we're done with this!
 ";
             // Optional - build customized script engine
             // so we can add custom
-
+            
             var scriptParser = new ScriptParser();
-
-            // add dependencies
-            scriptParser.AddAssembly(typeof(ScriptParserTests));
-            scriptParser.AddNamespace("Westwind.Scripting.Test");
+            scriptParser.AddAssembly(typeof(Westwind.Utilities.StringUtils));
+            // scriptParser.AddNamespace("Westwind.Utilities");  // done in code
 
             // Execute
             string result = scriptParser.ExecuteScript(script, model);
@@ -76,6 +73,7 @@ And we're done with this!
 
             Console.WriteLine(scriptParser.ScriptEngine.GeneratedClassCodeWithLineNumbers);
             Assert.IsNotNull(result, scriptParser.ScriptEngine.ErrorMessage);
+            
         }
 
         /// <summary>
@@ -103,10 +101,11 @@ Hello World. Date is: {{ Model.DateTime.ToString(""d"") }}!
 
 And we're done with this!
 ";
-            
+
             var scriptParser = new ScriptParser();
             scriptParser.AddAssembly(typeof(ScriptParserTests));
             scriptParser.AddNamespace("Westwind.Scripting.Test");
+            
 
             string result = await scriptParser.ExecuteScriptAsync(script, model);
 
@@ -146,20 +145,19 @@ And we're done with this!
             Console.WriteLine(scriptParser.ScriptEngine.GeneratedClassCodeWithLineNumbers);
 
             Assert.IsNotNull(result, scriptParser.ScriptEngine.ErrorMessage);
-
         }
 
 
         [TestMethod]
         public void ExecuteScriptWithModelWithReferenceTest()
         {
-            var model = new TestModel { Name = "rick", DateTime = DateTime.Now.AddDays(-10) };
+            var model = new TestModel { Name = "Rick & Dale", DateTime = DateTime.Now.AddDays(-10) };
 
             string script = @"
 Hello World. Date is: {{ Model.DateTime.ToString(""d"") }}!
 {{% for(int x=1; x<3; x++) {
 }}
-{{ x }}. Hello World {{Model.Name}}
+{{ x }}. Hello World {{ Model.Name }}
 {{% } }}
 
 And we're done with this!
@@ -172,6 +170,7 @@ And we're done with this!
             // so we can add custom
 
             var scriptParser = new ScriptParser();
+            scriptParser.ScriptingDelimiters.HtmlEncodeExpressionsByDefault = true;
 
             // add dependencies
             scriptParser.AddAssembly(typeof(ScriptParserTests));
@@ -202,12 +201,12 @@ Hello World. Date is: {{ Model.DateTime.ToString(""d"") }}!
 
 And we're done with this!
 ";
-            
+
             // Optional - build customized script engine
             // so we can add custom
 
             var exec = CSharpScriptExecution.CreateDefault();
-            
+
             // add dependencies
             exec.AddAssembly(typeof(ScriptParserTests));
             exec.AddNamespace("Westwind.Scripting.Test");
@@ -283,10 +282,36 @@ And we're done with this!
             string script = @"
 Hello World. Date is: {{ DateTime.Now.ToString(""d"") }}!
 
-{{% for(int x=1; x<3; x++) { }}
-{{ x }}. Hello World
+{{% for(int x=1; x<3; x++) { }} {{ x }}. Hello World
 {{% } }}
 
+DONE!
+";
+            Console.WriteLine(script + "\n\n");
+
+            var scriptParser = new ScriptParser();
+            scriptParser.ScriptingDelimiters.HtmlEncodeExpressionsByDefault = true;
+            var code = scriptParser.ParseScriptToCode(script);
+
+            Assert.IsNotNull(code, "Code should not be null or empty");
+
+            Console.WriteLine(code);
+
+            var result = scriptParser.ExecuteScript(script, null);
+
+            Console.WriteLine(result);
+
+            Console.WriteLine("---\n" + scriptParser.ScriptEngine.GeneratedClassCodeWithLineNumbers);
+
+            Assert.IsNotNull(result, scriptParser.ScriptEngine.ErrorMessage);
+        }
+
+        [TestMethod]
+        public void DoubleBracketsInTextParserTest()
+        {
+            string script = @"
+Hello World this should not be treated as an expression \{\{ not-expression \}\}.
+Time is {{ DateTime.Now }}.
 DONE!
 ";
             Console.WriteLine(script + "\n\n");
@@ -297,6 +322,60 @@ DONE!
             Assert.IsNotNull(code, "Code should not be null or empty");
 
             Console.WriteLine(code);
+
+            var result = scriptParser.ExecuteScript(script, null);
+
+            Console.WriteLine(result);
+
+            Console.WriteLine("---\n" + scriptParser.ScriptEngine.GeneratedClassCodeWithLineNumbers);
+
+            Assert.IsNotNull(result, scriptParser.ScriptEngine.ErrorMessage);
+        }
+
+
+        [TestMethod]
+        public void DefaultHtmlEncodedExpressionsParserTest()
+        {
+            string script = @"
+{{%
+string text = ""This is some \""text\"" that should be encoded & formatted."";
+writer.Write(Script.HtmlEncode(""This & that written out from script""));
+}}
+
+Here is some encoded text:
+
+---
+{{ text }}
+---
+
+This text should **not** be encoded:
+
+{{! text }}
+{{ RawString.Raw(text) }}
+{{ new RawString(text) }}
+{{: RawString.Raw(text) }}    // This won't encode regardless of the override
+
+DONE!
+";
+            Console.WriteLine("Script Code\n---\n" + script + "\n\n");
+
+            var scriptParser = new ScriptParser();
+            scriptParser.ScriptingDelimiters.HtmlEncodeExpressionsByDefault = true;
+
+            var code = scriptParser.ParseScriptToCode(script);
+
+            Assert.IsNotNull(code, "Code should not be null or empty");
+
+            var result = scriptParser.ExecuteScript(script, null);
+
+            Console.WriteLine("Script Output\n--\n" + result);
+
+            Console.WriteLine("ParseScript Output\n---\n" + code + "\n---\n");
+
+
+            Console.WriteLine("Generated Class Code\n---\n" + scriptParser.ScriptEngine.GeneratedClassCodeWithLineNumbers);
+
+            Assert.IsNotNull(result, scriptParser.ScriptEngine.ErrorMessage);
         }
 
         [TestMethod]
@@ -305,10 +384,15 @@ DONE!
             string script = @"
 Hello World. Date is: {{ DateTime.Now.ToString(""d"") }}!
 
-{{% for(int x=1; x<3; x++) { }}
-{{ x }}. Hello World {{% } }}
-And we're done with this!
+{{:""Hello & World! "".Trim() }}
+
+{{ this.ToString() }}
 ";
+
+            //{{% for(int x=1; x<3; x++) { }}
+            //{{ x }}. Hello World {{% } }}
+            //And we're done with this!
+            //";
 
             Console.WriteLine(script + "\n\n");
 
@@ -322,7 +406,12 @@ And we're done with this!
             // Explicit let Script Engine Execute code
             var result = scriptParser.ScriptEngine.ExecuteCode(code);
 
+
+            Assert.IsNotNull(result, scriptParser.ScriptEngine.ErrorMessage);
+
             Console.WriteLine(result);
+
+            Console.WriteLine("---\n" + scriptParser.ScriptEngine.GeneratedClassCodeWithLineNumbers);
         }
 
 
@@ -340,7 +429,7 @@ And we're done with this!
         [TestMethod]
         public void BasicScriptParserAndManuallyExecuteWithModelTest()
         {
-            var model = new TestModel {Name = "rick", DateTime = DateTime.Now.AddDays(-10)};
+            var model = new TestModel { Name = "rick", DateTime = DateTime.Now.AddDays(-10) };
 
             string script = @"
 Hello World. Date is: {{ Model.DateTime.ToString(""d"") }}!
@@ -380,7 +469,7 @@ And we're done with this!
         [TestMethod]
         public async Task BasicScriptParserAndExecuteAsyncWithModelTest()
         {
-            var model = new TestModel {Name = "rick", DateTime = DateTime.Now.AddDays(-10)};
+            var model = new TestModel { Name = "rick", DateTime = DateTime.Now.AddDays(-10) };
 
             string script = @"
 Hello World. Date is: {{ Model.DateTime.ToString(""d"") }}!
@@ -403,9 +492,9 @@ And we're done with this!
 
             Console.WriteLine(code);
 
-            var exec = new CSharpScriptExecution() { SaveGeneratedCode = true};
+            var exec = new CSharpScriptExecution() { SaveGeneratedCode = true };
             exec.AddDefaultReferencesAndNamespaces();
-            
+
             // explicitly add the type and namespace so the script can find the model type
             // which we are passing in explicitly here
             exec.AddAssembly(typeof(ScriptParserTests));
@@ -464,11 +553,131 @@ Hello World. Date is: today!
         }
 
 
+        [TestMethod]
+        public async Task BasicPartialTest()
+        {
+            var model = new TestModel { Name = "rick", DateTime = DateTime.Now.AddDays(-10) };
+            string script = """
+<div>
+Hello World. Date is: {{ DateTime.Now.ToString() }}
+
+{{ await Script.RenderPartialAsync("./Templates/Time_Partial.csscript") }}
+Done.
+</div>
+""";
+            Console.WriteLine(script + "\n---");
+
+
+            var scriptParser = new ScriptParser();
+            scriptParser.AddAssembly(typeof(ScriptParserTests));
+
+
+            string result = await scriptParser.ExecuteScriptAsync(script, model);
+            Console.WriteLine(result);
+            Console.WriteLine(scriptParser.GeneratedClassCodeWithLineNumbers);
+
+            Assert.IsNotNull(result, scriptParser.ErrorMessage);
+        }
+
+
+        [TestMethod]
+        public async Task BasicRenderScriptTest()
+        {
+            var model = new TestModel { Name = "rick", DateTime = DateTime.Now.AddDays(-10), Expression = "Time: {{ DateTime.Now.ToString(\"HH:mm:ss\") }}" };
+            string script = """
+<div>
+Hello World. Date is: {{ DateTime.Now.ToString() }}
+<b>{{ Model.Name }}</b>
+
+{{ await Script.RenderScriptAsync(Model.Expression,null) }}
+
+Done.
+</div>
+""";
+            Console.WriteLine(script + "\n---");
+
+
+            var scriptParser = new ScriptParser();
+            scriptParser.AddAssembly(typeof(ScriptParserTests));
+
+
+            string result = await scriptParser.ExecuteScriptAsync(script, model);
+
+            Console.WriteLine(result);
+            Console.WriteLine(scriptParser.Error + " " + scriptParser.ErrorType + " " + scriptParser.ErrorMessage + " ");
+            Console.WriteLine(scriptParser.GeneratedClassCodeWithLineNumbers);
+
+            Assert.IsNotNull(result, scriptParser.ErrorMessage);
+        }
+
+
+        /// <summary>
+        /// Ensure that multiple runs of the same script parser instance
+        /// will update when new script is passed to the same instance even
+        /// while cached if code/script has been modified (ie. live script scenario)
+        /// </summary>
+        /// <returns></returns>
+        [TestMethod]
+        public async Task ScriptModificationMultiRunTest()
+        {
+            var model = new TestModel { Name = "rick", DateTime = DateTime.Now.AddDays(-10), Expression = "Time: {{ DateTime.Now.ToString(\"HH:mm:ss\") }}" };
+            string script = """
+                            <div>
+                            Hello World. Date is: {{ DateTime.Now.ToString() }}
+                            <b>{{ Model.Name }}</b>
+
+                            {{ await Script.RenderScriptAsync(Model.Expression,null) }}
+
+                            Done.
+                            </div>
+                            """;
+            Console.WriteLine(script + "\n---");
+
+
+            var scriptParser = new ScriptParser();
+            scriptParser.AddAssembly(typeof(ScriptParserTests));
+
+            string result = await scriptParser.ExecuteScriptAsync(script, model);
+
+            Console.WriteLine(result + "\n----\n\n");
+
+            script = """
+                            <h1>MODIFIED!</h1>
+                            <div>
+                            Hello World. Date is: {{ DateTime.Now.ToString() }}
+                            <b>{{ Model.Name }}</b>
+
+                            {{ await Script.RenderScriptAsync(Model.Expression,null) }}
+
+                            Done.
+                            </div>
+                            """;
+            Console.WriteLine(script + "\n---");
+
+
+            result = await scriptParser.ExecuteScriptAsync(script, model);
+
+            Console.WriteLine(result);
+
+
+            Console.WriteLine(scriptParser.Error + " " + scriptParser.ErrorType + " " + scriptParser.ErrorMessage + " ");
+            Console.WriteLine(scriptParser.GeneratedClassCodeWithLineNumbers);
+
+            Assert.IsNotNull(result, scriptParser.ErrorMessage);
+            
+            Assert.IsTrue(result.Contains("MODIFIED!"));
+        }
+
     }
 
     public class TestModel
     {
         public string  Name { get; set; }
         public DateTime DateTime { get; set; } = DateTime.Now;
+
+        /// <summary>
+        /// Test for Nested Expression Parsing
+        /// </summary>
+        public string Expression { get; set; }
     }
 }

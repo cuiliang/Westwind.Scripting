@@ -1,8 +1,7 @@
 ﻿using System;
-using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Text;
-using System.Threading.Tasks;
 
 namespace Westwind.Scripting
 {
@@ -13,7 +12,7 @@ namespace Westwind.Scripting
             const int stringSize = 8;
 
             string str = "abcdefghijkmnopqrstuvwxyz1234567890";
-            StringBuilder stringBuilder = new StringBuilder(stringSize);
+            var stringBuilder = new StringBuilder(stringSize);
             int num1 = 0;
             foreach (byte num2 in Guid.NewGuid().ToByteArray())
             {
@@ -29,7 +28,7 @@ namespace Westwind.Scripting
         {
             if (string.IsNullOrEmpty(text))
                 return text;
-            StringBuilder stringBuilder = new StringBuilder();
+            var stringBuilder = new StringBuilder();
             string[] lines = GetLines(text);
             int totalWidth = 2;
             if (lines.Length > 9999)
@@ -56,8 +55,32 @@ namespace Westwind.Scripting
             s = s.Replace("\r\n", "\n");
             if (maxLines < 1)
                 return s.Split('\n');
-            return ((IEnumerable<string>)s.Split('\n')).Take<string>(maxLines).ToArray<string>();
+            return s.Split('\n').Take(maxLines).ToArray();
         }
-        
+
+
+        /// <summary>
+        /// Normalizes a file path to the operating system default
+        /// slashes.
+        /// </summary>
+        /// <param name="path"></param>
+        public static string NormalizePath(string path)
+        {
+            //return Path.GetFullPath(path); // this always turns into a full OS path
+
+            if (string.IsNullOrEmpty(path))
+                return path;
+
+            char slash = Path.DirectorySeparatorChar;
+            path = path.Replace('/', slash).Replace('\\', slash);
+            string doubleSlash = string.Concat(slash, slash);
+            if (path.StartsWith(doubleSlash))
+                return string.Concat(doubleSlash, path.TrimStart(slash).Replace(doubleSlash, slash.ToString()));
+            else
+                return path.Replace(doubleSlash, slash.ToString());
+        }
+
+
+       
     }
 }

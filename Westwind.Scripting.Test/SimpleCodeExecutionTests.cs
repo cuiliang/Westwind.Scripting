@@ -2,6 +2,7 @@
 using System.Collections;
 using System.Diagnostics;
 using System.Threading.Tasks;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Westwind.Utilities;
 
@@ -264,12 +265,15 @@ return result;
             //script.AddAssembly(typeof(ScriptTest));
             //script.AddNamespace("Westwind.Scripting.Test");
 
-            var model = new ScriptTest() { Message = "Hello World " };
+            var model = new ScriptTest()
+            {
+                Message = "Hello World ",
+            };
 
 
             var code = @"
 #r Westwind.ScriptExecution.Test.dll
-using Westwind.Scripting.Test
+using Westwind.Scripting.Test;
 
 dynamic Model = @0;
 
@@ -325,19 +329,20 @@ return result;
             Assert.IsFalse(script.Error, script.ErrorMessage);
         }
 
-
-
         [TestMethod]
         public void ExecuteMethodTest()
         {
             var exec = new CSharpScriptExecution()
             {
-                SaveGeneratedCode = true
+                SaveGeneratedCode = true,
+                AllowReferencesInCode = true
             };
             exec.AddDefaultReferencesAndNamespaces();
             exec.AddAssembly("System.Net.WebClient.dll");
 
             string code = $@"
+#r ReferenceTest.dll
+
 public string HelloWorld(string name)
 {{
     var wc = new System.Net.WebClient();
@@ -350,6 +355,10 @@ public string HelloWorld(string name)
     
     dynamic name2 = ""RIck"";
     Console.WriteLine(name2);
+
+    var t = new ReferenceTest.Test();
+    var hello = t.HelloWorld();
+    Console.WriteLine(hello);
 
     return result;
 }}";
@@ -373,6 +382,61 @@ public string HelloWorld(string name)
             Assert.IsTrue(result.Contains("Hello Markus"));
 
         }
+
+
+        [TestMethod]
+        public void ExecuteMethodWithExternalReferenceTest()
+        {
+            var exec = new CSharpScriptExecution()
+            {
+                SaveGeneratedCode = true,
+                AllowReferencesInCode = true
+            };
+            exec.AddDefaultReferencesAndNamespaces();
+            exec.AddAssembly("System.Net.WebClient.dll");
+
+            string code = $@"
+#r ReferenceTest.dll
+
+public string HelloWorld(string name)
+{{
+    var wc = new System.Net.WebClient();
+    wc.DownloadString(new Uri(""https://west-wind.com""));
+
+
+    var first = new int[] {{ 1,2,3,4,5 }}.First();
+    Console.WriteLine(first);
+    
+    dynamic name2 = ""RIck"";
+    Console.WriteLine(name2);
+
+    var t = new ReferenceTest.Test();
+    var hello = ""Referenced:  "" + t.HelloWorld(name);
+    Console.WriteLine(hello);
+
+    return hello;
+}}";
+
+            string result = exec.ExecuteMethod(code, "HelloWorld", "Rick") as string;
+
+            Console.WriteLine($"Result: {result}");
+            Console.WriteLine($"Error: {exec.Error}");
+            
+
+            Assert.IsFalse(exec.Error, exec.ErrorMessage + "\n" + exec.GeneratedClassCode);
+            // from reference assembly Test.Hello
+            Assert.IsTrue(result.Contains("Time is:"));
+
+            // Just invoke the method again directly without any compilation/building
+            // this is the fastest way to do multiple invocations.
+            result = exec.InvokeMethod(exec.ObjectInstance, "HelloWorld", "Markus") as string;
+
+            Console.WriteLine($"Result: {result}");
+            Assert.IsFalse(exec.Error);
+            Assert.IsTrue(result.Contains("Hello, Markus"));
+
+        }
+
 
 
         [TestMethod]
@@ -429,6 +493,87 @@ public async Task<string> GetJsonFromAlbumViewer(int id)
             Assert.IsFalse(script.Error, script.ErrorMessage);
             Assert.IsNotNull(result,"Not a JSON response");
         }
+
+
+
+        [TestMethod]
+        public async Task ExecuteAsyncMethodWithNoResultTest()
+        {
+            var script = new CSharpScriptExecution();
+
+            // lets not load assembly refs from host app in 6.0 but load explicitly below
+            script.AddDefaultReferencesAndNamespaces();
+
+
+            string code = $@"
+public async Task NoResultConsole(int id)
+{{
+    Console.WriteLine($""Just writing some output...{{id}}"");    
+}}";
+        
+            try
+            {
+                 await script.ExecuteMethodAsyncVoid(code, "NoResultConsole", 37);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(ex.Message);
+                return;
+            }
+
+            Assert.IsFalse(script.Error, script.ErrorMessage);
+        }
+
+
+        [TestMethod]
+        public void ExecuteMethodWithRuntimeExceptionTest()
+        {
+            var exec = new CSharpScriptExecution()
+            {
+                SaveGeneratedCode = true,
+                ThrowExceptions = false,  // capture error
+                CompileWithDebug = true   // provide error info for stack trace
+            };
+            exec.AddDefaultReferencesAndNamespaces();
+            exec.AddAssembly("System.Net.WebClient.dll");
+
+            string code = $@"
+public string HelloWorld(string name)
+{{
+    var wc = new System.Net.WebClient();
+    wc.DownloadString(new Uri(""https://west-wind.com""));
+
+    string result = $""Hello {{name}}. Time is: {{DateTime.Now}}."";
+
+    // This should cause a runtime error
+    string x = null;
+    x = x.Trim();
+
+    var first = new int[] {{ 1,2,3,4,5 }}.First();
+    Console.WriteLine(first);
+    
+    dynamic name2 = ""RIck"";
+    Console.WriteLine(name2);
+
+    return result;
+}}";
+
+            string result = exec.ExecuteMethod(code, "HelloWorld", "Rick") as string;
+
+            Console.WriteLine($"Result: {result}");
+            Console.WriteLine($"Error: {exec.Error}");
+            Console.WriteLine(exec.ErrorMessage);
+
+            // Since we compiled for Debug we should get a line number
+            Console.WriteLine(exec.LastException.StackTrace);
+
+            // which you can correlate to the generated code
+            Console.WriteLine(exec.GeneratedClassCodeWithLineNumbers);
+
+            // yup we had an error
+            Assert.IsTrue(exec.Error);
+        }
+
 
         [TestMethod]
         public async Task ExecuteAsyncVoidMethodTest()
