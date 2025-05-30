@@ -196,7 +196,7 @@ namespace Westwind.Scripting
         /// <summary>
         /// Internal reference to the Assembly Generated
         /// </summary>
-        protected Assembly Assembly { get; set; }
+        public Assembly Assembly { get; private set; }
 
         /// <summary>
         /// Internal reference to the generated type that
@@ -359,6 +359,9 @@ namespace Westwind.Scripting
             if (!CachedAssemblies.ContainsKey(hash))
             {
                 var sb = GenerateClass(code);
+
+                //这里 noload = true,实际上不会加载Assembly。
+                //因此CachedAssemblies只是用来表示有哪些已经生成的程序集。
                 if (!CompileAssembly(sb.ToString(), true))
                     return false;
 
